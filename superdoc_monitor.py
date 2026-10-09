@@ -1,25 +1,28 @@
 #!/usr/bin/env python3
 """
-Watches a superdoc.bg doctor page and alerts you when an earlier
-appointment slot appears.
+Watches both locations of a superdoc.bg doctor and alerts you when a free
+appointment hour appears on or before the cutoff date (default: end of October).
 
-It reads the line "Най-ранен час: 6 януари 13:00" (earliest slot) from the
-page, compares it with the last value seen (state.json), and alerts if the
-slot got earlier or appeared where there were none.
+Data source: Superdoc's own calendar endpoint, one per location:
+  https://superdoc.bg/calendar/<ID>/today/7
+Each response includes "earliestSlot" (the earliest free hour at that location)
+and the next 7 days with a "bookable" flag per hour.
 
-Alert options (all optional, combine freely):
+Alerts (all optional, combine freely):
   FAIL_ON_ALERT=1   exit with an error when a slot is found. On GitHub Actions
                     this makes GitHub email you automatically. No password.
   NTFY_TOPIC=...    push notification to the free ntfy app (no account).
   EMAIL_USER / EMAIL_PASS / EMAIL_TO   classic Gmail SMTP email.
 
 Other:
-  ALERT_BEFORE=2026-12-31   only alert for slots before this date
+  ALERT_BEFORE=2026-10-31   last date you care about (default 2026-10-31)
+
+A slot only triggers an alert once; if it disappears and comes back, you are
+alerted again. State is kept in state.json.
 """
 
 import json
 import os
-import re
 import smtplib
 import sys
 from datetime import datetime, date
@@ -28,70 +31,77 @@ from pathlib import Path
 
 import requests
 
-URL = "https://superdoc.bg/lekar/dimitar-georgiev"
+BASE = "https://superdoc.bg/calendar/{id}/today/7"
+PAGE_URL = "https://superdoc.bg/lekar/dimitar-georgiev"
+LOCATIONS = {
+    "12446": "Private practice (ул. Захари Княжевски 2)",
+    "2453": "МЦ 1 Пловдив (бул. Васил Априлов 20)",
+}
 STATE_FILE = Path(__file__).with_name("state.json")
 
-MONTHS = {
-    "януари": 1, "февруари": 2, "март": 3, "април": 4, "май": 5, "юни": 6,
-    "юли": 7, "август": 8, "септември": 9, "октомври": 10, "ноември": 11,
-    "декември": 12,
-}
 
-SLOT_RE = re.compile(
-    r"Най-ранен час:\s*(\d{1,2})\s+([а-я]+)\s+(\d{1,2}):(\d{2})", re.IGNORECASE
-)
+def cutoff() -> date:
+    return date.fromisoformat(os.environ.get("ALERT_BEFORE") or "2026-10-31")
 
 
-def fetch_page() -> str:
+def fetch_calendar(cal_id: str) -> dict:
     resp = requests.get(
-        URL,
-        headers={"User-Agent": "Mozilla/5.0 (personal appointment watcher)"},
+        BASE.format(id=cal_id),
+        headers={
+            "User-Agent": "Mozilla/5.0 (personal appointment watcher)",
+            "Accept": "application/json",
+            "Referer": PAGE_URL,
+        },
         timeout=30,
     )
     resp.raise_for_status()
-    return resp.text
+    return resp.json()
 
 
-def parse_earliest(html: str):
-    """Return the earliest slot as a datetime, or None if no slot is shown."""
-    text = re.sub(r"<[^>]+>", " ", html)
-    text = re.sub(r"\s+", " ", text)
-    m = SLOT_RE.search(text)
-    if not m:
-        return None
-    day, month_name, hour, minute = m.groups()
-    month = MONTHS.get(month_name.lower())
-    if not month:
-        return None
-    today = date.today()
-    slot = datetime(today.year, month, int(day), int(hour), int(minute))
-    # The page omits the year: if the date already passed, it means next year.
-    if slot.date() < today:
-        slot = slot.replace(year=today.year + 1)
-    return slot
+def find_slots(data: dict, limit: date) -> set:
+    """Return {'YYYY-MM-DD HH:MM', ...} of free hours on or before `limit`."""
+    cal = data.get("calendar", {})
+    found = set()
+
+    # 1) the earliest free hour at this location, whenever it is
+    earliest = cal.get("earliestSlot")
+    if earliest and earliest.get("date") and earliest.get("time"):
+        if date.fromisoformat(earliest["date"]) <= limit:
+            found.add(f"{earliest['date']} {earliest['time']}")
+
+    # 2) any bookable hour in the 7-day window (double check)
+    for day in cal.get("output", []):
+        if date.fromisoformat(day["date"]) > limit:
+            continue
+        for s in day.get("slots_list", []):
+            if s.get("bookable"):
+                found.add(f"{day['date']} {s['time']}")
+    return found
 
 
-def load_state():
+def load_state() -> dict:
     if STATE_FILE.exists():
-        raw = json.loads(STATE_FILE.read_text()).get("earliest")
-        return datetime.fromisoformat(raw) if raw else None
-    return None
+        try:
+            return json.loads(STATE_FILE.read_text()).get("alerted", {})
+        except Exception:
+            return {}
+    return {}
 
 
-def save_state(slot):
-    STATE_FILE.write_text(json.dumps({"earliest": slot.isoformat() if slot else None}))
+def save_state(alerted: dict):
+    STATE_FILE.write_text(json.dumps({"alerted": alerted}, indent=1, sort_keys=True))
 
 
-def notify(current: datetime):
-    subject = "Earlier appointment available"
-    body = f"Earliest slot is now {current:%d %B %Y, %H:%M}.\nBook here: {URL}\n"
+def notify(lines: list):
+    subject = "Free appointment hour available"
+    body = "\n".join(lines) + f"\n\nBook here: {PAGE_URL}\n"
 
     topic = os.environ.get("NTFY_TOPIC")
     if topic:
         requests.post(
             f"https://ntfy.sh/{topic}",
             data=body.encode("utf-8"),
-            headers={"Title": subject, "Click": URL},
+            headers={"Title": subject, "Click": PAGE_URL},
             timeout=30,
         )
         print("ntfy notification sent.")
@@ -108,30 +118,33 @@ def notify(current: datetime):
 
 
 def main():
-    try:
-        current = parse_earliest(fetch_page())
-    except Exception as exc:  # network error, site down, etc.
-        print(f"{datetime.now():%Y-%m-%d %H:%M} fetch failed: {exc}", file=sys.stderr)
-        return
+    limit = cutoff()
+    old_state = load_state()
+    new_state = dict(old_state)  # keep old data for a location that fails to load
+    alert_lines = []
 
-    previous = load_state()
-    print(f"{datetime.now():%Y-%m-%d %H:%M} earliest now={current} previous={previous}")
+    for cal_id, name in LOCATIONS.items():
+        try:
+            data = fetch_calendar(cal_id)
+            slots = find_slots(data, limit)
+        except Exception as exc:
+            print(f"{datetime.now():%Y-%m-%d %H:%M} {name}: fetch failed: {exc}", file=sys.stderr)
+            continue
 
-    if current is None:
-        save_state(None)
-        return
+        earliest = (data.get("calendar", {}).get("earliestSlot") or {}).get("text", "none")
+        print(f"{datetime.now():%Y-%m-%d %H:%M} {name}: earliest={earliest}, slots<=cutoff={sorted(slots)}")
 
-    should_alert = previous is None or current < previous
+        fresh = slots - set(old_state.get(cal_id, []))
+        for s in sorted(fresh):
+            alert_lines.append(f"{name}: free hour on {s}")
+        new_state[cal_id] = sorted(slots)
 
-    limit = os.environ.get("ALERT_BEFORE")
-    if limit and current.date() > date.fromisoformat(limit):
-        should_alert = False
+    save_state(new_state)
 
-    save_state(current)
-
-    if should_alert:
-        notify(current)
-        print(f"ALERT: earliest slot is {current:%d %B %Y, %H:%M}")
+    if alert_lines:
+        notify(alert_lines)
+        for line in alert_lines:
+            print("ALERT:", line)
         if os.environ.get("FAIL_ON_ALERT") == "1":
             sys.exit(1)  # makes GitHub send its built-in failure email
 
