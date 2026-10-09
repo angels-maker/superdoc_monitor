@@ -2,7 +2,7 @@ name: superdoc-monitor
 
 on:
   schedule:
-    - cron: "*/15 * * * *"   # every 15 minutes (use "*/30 * * * *" for a private repo)
+    - cron: "*/30 * * * *"   # every 30 minutes
   workflow_dispatch:          # lets you run it manually from the Actions tab
 
 permissions:
@@ -23,12 +23,12 @@ jobs:
       - name: Check for earlier slots
         run: python superdoc_monitor.py
         env:
-          EMAIL_USER: ${{ secrets.EMAIL_USER }}
-          EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
-          EMAIL_TO: ${{ secrets.EMAIL_TO }}
-          ALERT_BEFORE: ${{ secrets.ALERT_BEFORE }}
+          FAIL_ON_ALERT: "1"   # a found slot = "failed run" = GitHub emails you
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}       # optional
+          ALERT_BEFORE: ${{ secrets.ALERT_BEFORE }}   # optional
 
       - name: Save state
+        if: always()
         run: |
           git config user.name "monitor-bot"
           git config user.email "monitor-bot@users.noreply.github.com"
