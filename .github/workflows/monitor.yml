@@ -2,16 +2,19 @@ name: superdoc-monitor
 
 on:
   schedule:
-    - cron: "*/15 * * * *"   # every 30 minutes
+    - cron: "*/10 * * * *"   # every 30 minutes
   workflow_dispatch:          # lets you run it manually from the Actions tab
 
 permissions:
   contents: write             # needed to commit state.json back
 
+concurrency:
+  group: superdoc-monitor     # never run two checks at the same time
+  cancel-in-progress: false
+
 jobs:
   check:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
 
@@ -34,4 +37,8 @@ jobs:
           git config user.name "monitor-bot"
           git config user.email "monitor-bot@users.noreply.github.com"
           if [ -f state.json ]; then git add state.json; fi
-          git diff --cached --quiet || (git commit -m "update state" && git push)
+          if ! git diff --cached --quiet; then
+            git commit -m "update state"
+            git pull --rebase -X theirs origin main
+            git push
+          fi
