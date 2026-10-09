@@ -41,7 +41,7 @@ STATE_FILE = Path(__file__).with_name("state.json")
 
 
 def cutoff() -> date:
-    return date.fromisoformat(os.environ.get("ALERT_BEFORE") or "2026-11-30")
+    return date.fromisoformat(os.environ.get("ALERT_BEFORE") or "2026-10-31")
 
 
 def fetch_calendar(cal_id: str) -> dict:
@@ -94,14 +94,20 @@ def save_state(alerted: dict):
 
 def notify(lines: list):
     subject = "Free appointment hour available"
-    body = "\n".join(lines) + f"\n\nBook here: {PAGE_URL}\n"
+    # The link comes first, so the notification itself is the booking link.
+    body = f"{PAGE_URL}\n\n" + "\n".join(lines) + "\n"
 
     topic = os.environ.get("NTFY_TOPIC")
     if topic:
         requests.post(
             f"https://ntfy.sh/{topic}",
             data=body.encode("utf-8"),
-            headers={"Title": subject, "Click": PAGE_URL},
+            headers={
+                "Title": subject,                      # headers must be plain ASCII
+                "Click": PAGE_URL,                     # tapping the notification opens the link
+                "Actions": f"view, Book now, {PAGE_URL}",  # plus a "Book now" button
+                "Priority": "high",
+            },
             timeout=30,
         )
         print("ntfy notification sent.")
