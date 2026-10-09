@@ -15,7 +15,7 @@ Alerts (all optional, combine freely):
   EMAIL_USER / EMAIL_PASS / EMAIL_TO   classic Gmail SMTP email.
 
 Other:
-  ALERT_BEFORE=2026-10-31   last date you care about (default 2026-10-31)
+  ALERT_BEFORE=2026-10-31   last date you care about (default 2026-11-30)
 
 A slot only triggers an alert once; if it disappears and comes back, you are
 alerted again. State is kept in state.json.
