@@ -2,7 +2,7 @@ name: superdoc-monitor
 
 on:
   schedule:
-    - cron: "*/30 * * * *"   # every 30 minutes
+    - cron: "*/15 * * * *"   # every 30 minutes
   workflow_dispatch:          # lets you run it manually from the Actions tab
 
 permissions:
