@@ -1,20 +1,25 @@
 name: superdoc-monitor
 
+# How this works: one run keeps checking every 10 minutes for about 5h45m,
+# then starts the next run itself. The hourly cron below is only a safety net
+# that restarts the chain if it ever stops. You start it once by hand.
 on:
   schedule:
-  - cron: "3,13,23,33,43,53 * * * *" 
-  workflow_dispatch:          # lets you run it manually from the Actions tab
+    - cron: "17 * * * *"
+  workflow_dispatch:
 
 permissions:
-  contents: write             # needed to commit state.json back
+  contents: write   # to save state.json
+  actions: write    # to start the next run
 
 concurrency:
-  group: superdoc-monitor     # never run two checks at the same time
+  group: superdoc-monitor   # only one run at a time; the next waits its turn
   cancel-in-progress: false
 
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 355
     steps:
       - uses: actions/checkout@v4
 
@@ -24,15 +29,25 @@ jobs:
 
       - run: pip install requests
 
-      - name: Check for earlier slots
-        run: python superdoc_monitor.py
+      - name: Check every 10 minutes for about 5h45m
         env:
-          FAIL_ON_ALERT: "1"   # a found slot = "failed run" = GitHub emails you
+          FAIL_ON_ALERT: "1"   # a found slot = failed run = GitHub emails you right away
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}       # optional
           ALERT_BEFORE: ${{ secrets.ALERT_BEFORE }}   # optional
+        run: |
+          end=$((SECONDS + 20700))
+          status=0
+          while [ "$SECONDS" -lt "$end" ]; do
+            if ! python superdoc_monitor.py; then
+              status=1      # alert found (or crash): stop here so GitHub emails you now
+              break
+            fi
+            sleep 600
+          done
+          exit $status
 
       - name: Save state
-        if: always()
+        if: success() || failure()
         run: |
           git config user.name "monitor-bot"
           git config user.email "monitor-bot@users.noreply.github.com"
@@ -42,3 +57,9 @@ jobs:
             git pull --rebase -X theirs origin main
             git push
           fi
+
+      - name: Start the next run
+        if: success() || failure()   # skipped if you cancel the run, so cancelling stops the chain
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run monitor.yml --ref "${GITHUB_REF_NAME}"
