@@ -41,7 +41,7 @@ STATE_FILE = Path(__file__).with_name("state.json")
 
 
 def cutoff() -> date:
-    return date.fromisoformat(os.environ.get("ALERT_BEFORE") or "2026-11-31")
+    return date.fromisoformat(os.environ.get("ALERT_BEFORE") or "2026-11-30")
 
 
 def fetch_calendar(cal_id: str) -> dict:
