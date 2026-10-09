@@ -1,24 +1,20 @@
 #!/usr/bin/env python3
 """
-Watches a superdoc.bg doctor page and emails you when an earlier
+Watches a superdoc.bg doctor page and alerts you when an earlier
 appointment slot appears.
 
-How it works: the page shows a line like "Най-ранен час: 6 януари 13:00"
-(earliest slot). We read that, compare it with the last value we saw
-(saved in state.json), and send an email if it got earlier or if a slot
-appeared where there were none.
+It reads the line "Най-ранен час: 6 януари 13:00" (earliest slot) from the
+page, compares it with the last value seen (state.json), and alerts if the
+slot got earlier or appeared where there were none.
 
-Setup:
-  pip install requests
-  export EMAIL_USER="you@gmail.com"
-  export EMAIL_PASS="your-gmail-app-password"   # NOT your normal password
-  export EMAIL_TO="you@gmail.com"
-  # optional: only alert for slots before this date
-  export ALERT_BEFORE="2026-12-31"
+Alert options (all optional, combine freely):
+  FAIL_ON_ALERT=1   exit with an error when a slot is found. On GitHub Actions
+                    this makes GitHub email you automatically. No password.
+  NTFY_TOPIC=...    push notification to the free ntfy app (no account).
+  EMAIL_USER / EMAIL_PASS / EMAIL_TO   classic Gmail SMTP email.
 
-Run once:   python superdoc_monitor.py
-Schedule:   cron, e.g. every 10 minutes:
-  */10 * * * * cd /path/to/folder && /usr/bin/python3 superdoc_monitor.py >> monitor.log 2>&1
+Other:
+  ALERT_BEFORE=2026-12-31   only alert for slots before this date
 """
 
 import json
@@ -68,18 +64,16 @@ def parse_earliest(html: str):
     if not month:
         return None
     today = date.today()
-    year = today.year
-    slot = datetime(year, month, int(day), int(hour), int(minute))
+    slot = datetime(today.year, month, int(day), int(hour), int(minute))
     # The page omits the year: if the date already passed, it means next year.
     if slot.date() < today:
-        slot = slot.replace(year=year + 1)
+        slot = slot.replace(year=today.year + 1)
     return slot
 
 
 def load_state():
     if STATE_FILE.exists():
-        data = json.loads(STATE_FILE.read_text())
-        raw = data.get("earliest")
+        raw = json.loads(STATE_FILE.read_text()).get("earliest")
         return datetime.fromisoformat(raw) if raw else None
     return None
 
@@ -88,15 +82,29 @@ def save_state(slot):
     STATE_FILE.write_text(json.dumps({"earliest": slot.isoformat() if slot else None}))
 
 
-def send_email(subject: str, body: str):
-    msg = EmailMessage()
-    msg["Subject"] = subject
-    msg["From"] = os.environ["EMAIL_USER"]
-    msg["To"] = os.environ["EMAIL_TO"]
-    msg.set_content(body)
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-        server.login(os.environ["EMAIL_USER"], os.environ["EMAIL_PASS"])
-        server.send_message(msg)
+def notify(current: datetime):
+    subject = "Earlier appointment available"
+    body = f"Earliest slot is now {current:%d %B %Y, %H:%M}.\nBook here: {URL}\n"
+
+    topic = os.environ.get("NTFY_TOPIC")
+    if topic:
+        requests.post(
+            f"https://ntfy.sh/{topic}",
+            data=body.encode("utf-8"),
+            headers={"Title": subject, "Click": URL},
+            timeout=30,
+        )
+        print("ntfy notification sent.")
+
+    user, pw, to = (os.environ.get(k) for k in ("EMAIL_USER", "EMAIL_PASS", "EMAIL_TO"))
+    if user and pw and to:
+        msg = EmailMessage()
+        msg["Subject"], msg["From"], msg["To"] = subject, user, to
+        msg.set_content(body)
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(user, pw)
+            server.send_message(msg)
+        print("Email sent.")
 
 
 def main():
@@ -119,14 +127,13 @@ def main():
     if limit and current.date() > date.fromisoformat(limit):
         should_alert = False
 
-    if should_alert:
-        send_email(
-            "Earlier appointment available",
-            f"Earliest slot is now {current:%d %B %Y, %H:%M}.\n\nBook here: {URL}\n",
-        )
-        print("Email sent.")
-
     save_state(current)
+
+    if should_alert:
+        notify(current)
+        print(f"ALERT: earliest slot is {current:%d %B %Y, %H:%M}")
+        if os.environ.get("FAIL_ON_ALERT") == "1":
+            sys.exit(1)  # makes GitHub send its built-in failure email
 
 
 if __name__ == "__main__":
